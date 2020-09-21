@@ -1,0 +1,568 @@
+---
+title: "BUSI97273Visualisation_GroupN-RMarkdown"
+output: html_document
+---
+
+```{r, include=FALSE, echo=FALSE}
+library(kableExtra)
+library(knitr)
+library(logistf)
+library(stargazer)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(readr)
+library(lubridate)
+library(grid)
+library(gridGraphics)
+library(gridExtra)
+library(scales)
+library(viridis)
+library(sqldf)
+library(corrplot)
+library(lessR)
+library(png)
+```
+
+# Loading Relevant Datasets  
+<br>  
+In this section, we load the "listings.csv.gz" data set for London, England, United Kingdom, which we downloaded from http://insideairbnb.com/get-the-data.html and called 'listings_big.csv'. Our scope of analysis requires that file only.
+
+
+```{r setup, include=FALSE}
+# Loading the dataset
+listing_big <- read_csv('listings_big.csv')
+head(listing_big, 5)
+
+# Examining the data types of the "listing_big" dataset
+sapply(listing_big, class)
+```
+
+# Cleaning the Dataset  
+<br>
+Next, we clean and check columns in the listings_big dataset.
+
+(1) We first remove selected text columns to simplify the data manipulation of our analysis. This gives us the dataset listing_red.  
+(2) We then remove features that we will not be referring to in our analysis and rows with null values in review_score_ratings which is our chosen Airbnb success indicator. Executing (1) and (2) gives us a dataset with 63,446 unique listings.  
+(3) We note that columns such as Monthly Price, Cleaning Fee and Security Deposit are of the string data type. We convert them to the double data type.  
+(4) We create more general property_type bins to obtain more useful insights from the data. 
+(5) We create dummies from the amenities string feature to better support our analysis. After steps (1) to (5), we end up with the listing_red3.csv dataset.     
+
+## (1) Removing Text Columns
+
+```{r}
+# Removing selected text columns
+listing_red <- listing_big %>% 
+  select(-listing_url, -name, -summary, -space, -description, -neighborhood_overview, -notes, -access, -interaction, -house_rules, -thumbnail_url, -medium_url, -picture_url, -xl_picture_url, -host_url, -host_about, -host_picture_url, - host_thumbnail_url)
+head(listing_red, 5)
+write.csv(listing_red, './listing_red.csv', row.names = TRUE)
+```
+
+```{r}
+# Cleaning listing_red
+sapply(listing_red, class)
+head(listing_red, 5)
+
+# Getting a sense of selected listing_red columns
+filter(listing_red, listing_red$host_listings_count != listing_red$host_total_listings_count)
+cat(".\nUnique values of property type : \n")
+unique(listing_red$property_type)
+cat("\nUnique values of room type : \n")
+unique(listing_red$room_type)
+cat("\nUnique values of bed type : \n")
+unique(listing_red$bed_type)
+
+# Checking the number of rows in the listing_red dataset
+nrow(listing_red) #85,068
+
+# Checking that all calculated counts sum up to calculated_host_listings_count
+nrow(filter(listing_red, listing_red$host_listings_count != calculated_host_listings_count)) #27,034
+filter(listing_red, calculated_host_listings_count != round(sum(calculated_host_listings_count_entire_homes, calculated_host_listings_count_private_rooms, calculated_host_listings_count_shared_rooms)),0) %>% select(id, calculated_host_listings_count, calculated_host_listings_count_entire_homes, calculated_host_listings_count_private_rooms, calculated_host_listings_count_shared_rooms) 
+```
+
+## (2) Removing unused features and null ratings  
+  
+```{r}
+# Removing unused columns and saving the resulting dataframe
+listing_red2 <- listing_red %>% select(-city, -state, -zipcode, -country, -host_is_superhost, -neighbourhood_group_cleansed, -jurisdiction_names, -first_review, -last_review, -square_feet, -license)
+
+# Removing rows with NAs in the column review_scores_rating since this is our chosen Airbnb success indicator
+listing_red2 <- listing_red2[!is.na(listing_red2$review_scores_rating),]
+
+# Checking if the resulting number of rows is large enough. There are 63,446 rows after deleting NAs.
+nrow(listing_red2)
+```
+
+## (3) Converting Monthly Price, Cleaning Fee and Security Deposit from strings to doubles  
+
+```{r}
+# Pulling out the relevant columns to be converted and the ids
+toconvert <- listing_red2 %>% select(id, price, monthly_price, weekly_price, security_deposit, cleaning_fee)
+
+# Converting the price-related columns from strings to doubles
+toconvert <- toconvert %>% 
+  mutate(
+    price_c = as.numeric(gsub('[$,]', '', toconvert$price)),
+    monthly_price_c = as.numeric(gsub('[$,]', '', toconvert$monthly_price)),
+    weekly_price_c = as.numeric(gsub('[$,]', '', toconvert$weekly_price)),
+    security_deposit_c = as.numeric(gsub('[$,]', '', toconvert$security_deposit)),
+    cleaning_fee_c = as.numeric(gsub('[$,]', '', toconvert$cleaning_fee))
+  ) %>% 
+  select(-price, -monthly_price, -weekly_price, -security_deposit, -cleaning_fee) %>% 
+  rename(
+    price = price_c,
+    monthly_price = monthly_price_c,
+    weekly_price = weekly_price_c,
+    security_deposit = security_deposit_c,
+    cleaning_fee = cleaning_fee_c
+  )
+
+# Merging the toconvert dataset with the listing_red2 dataset from which we remove the string columns to replace them with the newly created double columns
+listing_red3 <- merge(
+  listing_red2 %>% select(-price, -monthly_price, -weekly_price, -security_deposit, -cleaning_fee), 
+  toconvert, by = "id"
+  )
+
+```
+
+## (4) Creating more general property type bins  
+<br>
+We noticed that there were a number of very granular and mixed property types in the dataset, some with very low counts, and others which were not that different from other property types in the list. Listings were mainly apartments and houses.
+<br>
+To ensure that we generate more actionable insights from our analysis, we created more meaningful and general groups of property types (property_types2) to support out research. These groups are houses, apartments, speciality listings (such as boats, barns, yurts) and others.   
+
+
+```{r}
+# Summarising counts by property_type
+types<- listing_red3 %>% group_by(property_type) %>% summarise(Count=n()) 
+types$Proportion <- round(((types$Count/sum(types$Count))*100),2)
+print(arrange(types, desc(types$Proportion)))
+```
+
+```{r}
+unique(listing_red3$property_type)
+
+# Defining new property type bins
+apartment_bin<-c("Apartment","Condominium","Serviced apartment", "Loft")
+house_bin<-c("House","Cottage", "Tiny house", "Earth house", "Bungalow", "Villa","Townhouse", "Guesthouse","Chalet","Casa particular (Cuba)")
+special_bin<-c("Boat", "Other", "Cabin", "Yurt", "Parking Space", "Nature lodge", "Camper/RV", "Hut", "Houseboat", "Island","Treehouse", "Barn","Ryokan (Japan)", "Farm stay", "Tent", "Lighthouse", "Bus")
+
+# Creating new bins in property_type2
+listing_red3 <- listing_red3 %>% 
+  mutate(property_type2 = ifelse(property_type %in% house_bin, "house", 
+                                 ifelse(property_type %in% apartment_bin, "apartment", 
+                                        ifelse(property_type %in% special_bin, "speciality", "others")
+                                        )
+                                 )
+         )
+head(listing_red3, 5)
+unique(listing_red3$property_type2)
+
+```
+
+
+## (5) Creating dummies from the amenities feature 
+<br>
+To effectively draw insights regarding amenities, we created dummy variables for different types of amenities. We noted that the amenities feature is likely generated from a drop-down list as string entries are standardised.  
+
+```{r}
+# Create a focused amenities dataset
+df_amenities <- listing_red3 %>% select(id, amenities)
+summary(df_amenities)
+
+# Converting all strings in amenities column to lower case
+df_amenities$amenities <- tolower(df_amenities$amenities)
+
+# Find the maximum number of amenities and printing the amenities to better understand the options
+df_amenities$num.of.am <- 
+  str_count(df_amenities$amenities, ",") +1
+filter(df_amenities, df_amenities$num.of.am == max(df_amenities$num.of.am))$amenities
+
+# Counting amenities by type. Clustering is determined by those judged to be similar.
+df_amenities$num.of.tvrelated <- str_count(df_amenities$amenities, "tv") + str_count(df_amenities$amenities, "netflix")
+df_amenities$num.of.wifi <- 
+  str_count(df_amenities$amenities, "wifi")
+df_amenities$num.of.toiletries <- 
+  str_count(df_amenities$amenities, "shower") + str_count(df_amenities$amenities, "hair dryer") + str_count(df_amenities$amenities, "shampoo") + str_count(df_amenities$amenities, "towel") + str_count(df_amenities$amenities, "bathroom essentials") + str_count(df_amenities$amenities, "body soap") + str_count(df_amenities$amenities, "toilet paper")  
+df_amenities$num.of.kitchen <- 
+  str_count(df_amenities$amenities, "kitchen") + str_count(df_amenities$amenities, "oven") + str_count(df_amenities$amenities, "breakfast") + str_count(df_amenities$amenities, "kettle") + str_count(df_amenities$amenities, "coffee") + str_count(df_amenities$amenities, "tea") + str_count(df_amenities$amenities, "espresso") + str_count(df_amenities$amenities, "dishes") + str_count(df_amenities$amenities, "stove") 
+df_amenities$num.of.laundry <-
+  str_count(df_amenities$amenities, "washer") + str_count(df_amenities$amenities, "dryer") + str_count(df_amenities$amenities, "linen") + str_count(df_amenities$amenities, "shower")
+df_amenities$num.of.luxury <-
+  str_count(df_amenities$amenities, "hot tub") + str_count(df_amenities$amenities, "jaccuzi") + str_count(df_amenities$amenities, "jaccuzzi") + str_count(df_amenities$amenities, "air con") + str_count(df_amenities$amenities, "pool") + str_count(df_amenities$amenities, "gym") + str_count(df_amenities$amenities, "tub") + str_count(df_amenities$amenities, "bbq grill") 
+df_amenities$num.of.business <-
+  str_count(df_amenities$amenities, "laptop") + str_count(df_amenities$amenities, "workspace") + str_count(df_amenities$amenities, "desk") 
+df_amenities$num.of.kids <- 
+  str_count(df_amenities$amenities, "kid friendly") + str_count(df_amenities$amenities, "child friendly") + str_count(df_amenities$amenities, "kid-friendly") + str_count(df_amenities$amenities, "child-friendly") + str_count(df_amenities$amenities, "high chair") + str_count(df_amenities$amenities, "crib") + str_count(df_amenities$amenities, "cot") 
+df_amenities$num.of.freepkg <- 
+  str_count(df_amenities$amenities, "free parking")
+df_amenities$num.of.security <- 
+  str_count(df_amenities$amenities, "lockbox") + str_count(df_amenities$amenities, "lock on bedroom door") + str_count(df_amenities$amenities, "smoking detector") + str_count(df_amenities$amenities, "carbon monoxide detector") + str_count(df_amenities$amenities, "fire extinguisher")
+df_amenities$num.of.convenientcheckin <- 
+  str_count(df_amenities$amenities, "self check-in") + str_count(df_amenities$amenities, "24-hour check-in") + str_count(df_amenities$amenities, "luggage dropoff allowed")
+df_amenities$num.of.disability <- 
+  str_count(df_amenities$amenities, "no stairs") + str_count(df_amenities$amenities, "wide entrance") + str_count(df_amenities$amenities, "flat path") + str_count(df_amenities$amenities, "extra space around bed") + str_count(df_amenities$amenities, "accessible-height bed") 
+
+# Checking the amenities dataframe
+head(df_amenities, 5)
+
+# Creating dummies
+df_amenities <- df_amenities %>% 
+  mutate(
+    dum.of.am = ifelse(num.of.am>0,1,0),
+    dum.of.tvrelated = ifelse(num.of.tvrelated>0,1,0),
+    dum.of.toiletries = ifelse(num.of.toiletries>0,1,0),
+    dum.of.kitchen = ifelse(num.of.kitchen>0,1,0),
+    dum.of.laundry = ifelse(num.of.laundry>0,1,0),
+    dum.of.luxury = ifelse(num.of.luxury>0,1,0),
+    dum.of.business = ifelse(num.of.business>0,1,0),
+    dum.of.kids = ifelse(num.of.kids>0,1,0),
+    dum.of.freepkg = ifelse(num.of.freepkg>0,1,0),
+    dum.of.security = ifelse(num.of.security>0,1,0),
+    dum.of.convenientcheckin = ifelse(num.of.convenientcheckin>0,1,0),
+    dum.of.disability = ifelse(num.of.disability>0,1,0)
+  )
+
+# Check that dummies are correctly created
+nrow(filter(df_amenities, num.of.am==0 & dum.of.am ==1))
+nrow(filter(df_amenities, num.of.tvrelated==0 & dum.of.tvrelated ==1))
+nrow(filter(df_amenities, num.of.toiletries==0 & dum.of.toiletries ==1))
+nrow(filter(df_amenities, num.of.kitchen==0 & dum.of.kitchen ==1))
+nrow(filter(df_amenities, num.of.laundry==0 & dum.of.laundry ==1))
+nrow(filter(df_amenities, num.of.luxury==0 & dum.of.luxury ==1))
+nrow(filter(df_amenities, num.of.business==0 & dum.of.business ==1))
+nrow(filter(df_amenities, num.of.kids==0 & dum.of.kids ==1))
+nrow(filter(df_amenities, num.of.freepkg==0 & dum.of.freepkg ==1))
+nrow(filter(df_amenities, num.of.security==0 & dum.of.security ==1))
+nrow(filter(df_amenities, num.of.convenientcheckin==0 & dum.of.convenientcheckin ==1))
+nrow(filter(df_amenities, num.of.disability==0 & dum.of.disability ==1))
+
+# Dropping the amenities column from the dataset
+df_amenities <- df_amenities %>% select(-amenities)
+df_amenities[] <- lapply(df_amenities[], factor)
+head(df_amenities, 5)
+summary(df_amenities)
+
+# Merging listing_red3 with df_amenities
+listing_red3 <- merge(
+  x=listing_red3, y=df_amenities, by="id", all.x=TRUE
+)
+
+# Saving df_amenities to a csv file
+write.csv(df_amenities, './df_amenities.csv', row.names = TRUE)
+
+# Writing the listing_red3 dataset into a csv file
+write.csv(listing_red3, './listing_red3.csv', row.names = TRUE)
+```
+
+As a reminder, our guiding research question was: What factors affect ratings of Airbnb properties in London? What follows is the code that we used to generate our three main charts, where each chart describes a key finding for each of our three sub-questions:
+
+1. Does location affect rating?
+2. Do property features affect rating and if so, which ones?
+3. Do host qualities affect rating?
+
+The production of each chart is described in detail in each following section. It is important to highlight that whilst we performed the main data cleaning and engineering before dividing the work among our team members, some team members had to perform some additional data work on their own for the purposes of their assigned questions.
+
+# Question 1: Does location affect rating?
+
+For this sub-question, one of our key findings related to the relationship between the length of the description of the transit options for listings and their ratings.
+
+```{r}
+# We create a column containing the word count of the transit description for each listing. 
+# One approach for this is to use the word_count function from the qdap library: listing_red3$trans_word_count<-word_count(listing_red3$transit,digit.remove = FALSE, names = FALSE, byrow=TRUE, missing=0). 
+# However, we occasionally encountered problems with loading the library. We found an alternative approach to do this on stackoverflow, which we use below.
+
+listing_red3$trans_word_count<-sapply(strsplit(listing_red3$transit, " "), length)
+
+
+# The code below creates a boxplot of the distribution of transit word counts over various ratings. Factor is required to separate different ratings. Otherwise we would get a single boxplot which shows no outliers. A geom smooth adds a line to show the trend, and “lm” is picked as we want to show a linear relationship. The grouping is required to give geom_smooth a line that runs through all the values, aes(group="a"). We scale the y axis of the graph to 0,175 as going above would be unnecessary. Theme removes legends for the colour and we change the tick marks to appear every 20 points as having all 100 would be redundant.
+
+nrow(listing_red3)
+transit_words_plot <- listing_red3 %>% 
+  ggplot(data = listing_red3, mapping = aes(x = factor(review_scores_rating), y=trans_word_count)) + 
+  geom_boxplot(fill = "skyblue2",aes(alpha = 0.2),outlier.shape = NA) +
+  geom_smooth(method = "lm", aes(group="a"),  color="black") +
+  scale_y_continuous(limit = c(0, 175)) +
+  labs(y=" Transport Word Count", x = element_blank())+
+  theme_light()+
+  theme(legend.position = "none",axis.text.x= element_text(size=9),axis.text=element_text(size=9),
+        axis.title=element_text(size=9))+scale_x_discrete(breaks=c("20","40","60","80","100"),labels=c("20","40","60","80","100"))
+
+
+# The code below creates a simple density plot which has its axess fitted with the below values. We remove the line from the density plot and add a geom_line for better visuals.Theme removes legends for the color and we change the tick marks to appear every 20 points as having all 100 would be redundant.
+
+Rank_Dist <- listing_red3 %>% 
+   ggplot(aes(x = review_scores_rating)) + 
+   geom_density(fill="skyblue2", color=NA) + 
+   scale_x_continuous(limit = c(20, 100),expand = c(0, 0.5))+
+   scale_y_continuous(breaks = c(0,7500,15000)) + xlab("Rating") + ylab("Count")+
+   theme_light()+geom_line(stat='density') +
+   theme(axis.text.x=element_text(size=9),axis.text=element_text(size=9),
+        axis.title=element_text(size=9))
+
+# This line of code creates a title for grid.arrange, fontsize is picked for the ggsave end chart.
+title2 <- textGrob(" Transport Description Length and Rating", just = "centre", gp=gpar(fontsize=10, font=2))
+
+
+# We create a chart made from the density plot and the boxplot. We add the empty placeholder for better visuals and our title on top. The main chart is T_chart.
+T_chart<- grid.arrange(title2, Rank_Dist, transit_words_plot, nrow=3 , widths=10, heights=c(1,5,12))
+
+# It is important to note that for the chart placed in the presentation we have used slightly different fontsizes and dimensions in the grid.arrange. We have also used ggsave to download a png version with high quality and custom size: ggsave(plot = T_chart, filename = "Q1.png",width = 20, height = 15, dpi = "retina")
+
+```
+
+
+# Question 2: Do property features affect rating and if so, which ones?
+
+For this sub-question, one of our key findings is about the relationship between different amenities and the ratings of apartments. For this purpose, we begin by creating a subset of listing_red3 by selecting only the numerical columns and the column that lets us know what property type we have.
+
+```{r}
+for_correlation<-listing_red3 %>% select(property_type2, accommodates, bathrooms, bedrooms, beds, review_scores_rating, number_of_reviews, price, cleaning_fee, security_deposit, num.of.am)
+```
+
+We then save this as a dataframe and remove NAs so that we can perform the correlation calculation.
+
+```{r}
+for_correlation<-as.data.frame(for_correlation)
+for_correlation<-na.omit(for_correlation)
+```
+
+
+We then split up the data into groups for each property type and remove the "property_type2" column.
+
+```{r}
+for_overall_correlation<-for_correlation[, !(colnames(for_correlation)=="property_type2")]
+for_house_correlation<-for_correlation[for_correlation$property_type2=="house",!(colnames(for_correlation)=="property_type2")]
+for_apartment_correlation<-for_correlation[for_correlation$property_type2=="apartment",!(colnames(for_correlation)=="property_type2")]
+for_speciality_correlation<-for_correlation[for_correlation$property_type2=="speciality",!(colnames(for_correlation)=="property_type2")]
+for_other_correlation<-for_correlation[for_correlation$property_type2=="other",!(colnames(for_correlation)=="property_type2")]
+```
+
+We then save the new data as dataframes.
+
+```{r}
+house_new<-as.data.frame(for_house_correlation) 
+apartment_new<-as.data.frame(for_apartment_correlation) 
+speciality_new<-as.data.frame(for_speciality_correlation) 
+```
+
+In what follows, we will be using the corrplot package to plot a correlation matrix, however, we will only be taking the subset that is the ratings column. 
+
+```{r, echo=TRUE, results="hide", fig.show="hide"}
+#Apartment Plot
+names(apartment_new)<-c("Capacity", "Num. of Bathrooms", "Num. of Bedrooms","Num. of Beds", "Rating", "Num. of Reviews","Price"," Cleaning Fee", "Security Deposit", "Amenities")
+apartment_new$Amenities<-as.numeric(as.character(apartment_new$Amenities))
+
+# Compute correlations with rating, ordered by correlation magnitude
+corr <- matrix(nrow=10, ncol=10, byrow=TRUE, cor(apartment_new))
+colnames(corr) <- c("Capacity", "Num. of Bathrooms", "Num. of Bedrooms","Num. of Beds", "Rating", "Num. of Reviews","Price"," Cleaning Fee", "Security Deposit", "Amenities")
+rownames(corr) <- colnames(corr)
+corr_reordered <- corReorder(corr, vars =c(5,10,1,4,8,6,9,3,2,7))
+corr_reordered <- corr_reordered[,1,drop=FALSE]
+```
+
+```{r, echo=FALSE}
+# Plot corr_plot and save it as an image. This will be used for the grid.arrange later.
+png(filename="corr_plot.png", width=200, height=430)
+corrplot(corr_reordered, method="number",cl.length= 2,bg="white",cl.pos = "b", tl.col="black", tl.cex=1,cl.lim=c(-1,1),col=viridis(n=10,alpha=1,begin=1, end=0))
+dev.off()
+
+```
+
+Next, we want to see how ratings vary when different types of amenities are included in an apartment. Apartments form the bulk of all listings in London.
+
+```{r}
+apts_am <- filter(listing_red3, property_type2 == "apartment")
+```
+
+We then compute and compare mean ratings across amenity types in a bar chart:
+
+```{r}
+diff_mean_tvrelated <- 
+  mean(filter(apts_am, apts_am$dum.of.tvrelated==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.tvrelated==0)$review_scores_rating)
+
+diff_mean_toiletries <- 
+  mean(filter(apts_am, apts_am$dum.of.toiletries==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.toiletries==0)$review_scores_rating)
+
+diff_mean_kitchen <- 
+  mean(filter(apts_am, apts_am$dum.of.kitchen==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.kitchen==0)$review_scores_rating)
+
+diff_mean_laundry <- 
+  mean(filter(apts_am, apts_am$dum.of.laundry==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.laundry==0)$review_scores_rating)
+
+diff_mean_luxury <- 
+  mean(filter(apts_am, apts_am$dum.of.luxury==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.luxury==0)$review_scores_rating)
+
+diff_mean_business <- 
+  mean(filter(apts_am, apts_am$dum.of.business==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.business==0)$review_scores_rating)
+
+diff_mean_kids <- 
+  mean(filter(apts_am, apts_am$dum.of.kids==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.kids==0)$review_scores_rating)
+
+diff_mean_freepkg <- 
+  mean(filter(apts_am, apts_am$dum.of.freepkg==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.freepkg==0)$review_scores_rating)
+
+diff_mean_security <- 
+  mean(filter(apts_am, apts_am$dum.of.security==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.security==0)$review_scores_rating)
+
+diff_mean_convenientchkin <- 
+  mean(filter(apts_am, apts_am$dum.of.convenientcheckin==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.convenientcheckin==0)$review_scores_rating)
+
+diff_mean_disability <- 
+  mean(filter(apts_am, apts_am$dum.of.disability==1)$review_scores_rating) - 
+  mean(filter(apts_am, apts_am$dum.of.disability==0)$review_scores_rating)
+
+
+diff_x <- c('tv', 'toiletries', 'kitchen', 'laundry', 'luxury', 'business','kids', 'free parking', 
+            'security', 
+            'convenient check in', 'disability')
+diff_y <- c(diff_mean_tvrelated, diff_mean_toiletries, diff_mean_kitchen, diff_mean_laundry,
+            diff_mean_luxury, diff_mean_business, diff_mean_kids, diff_mean_freepkg, diff_mean_security,
+            diff_mean_convenientchkin, diff_mean_disability)
+
+# View the results
+setNames(diff_x, diff_y)
+
+# Reading results into a dataframe
+df_mean_diff <- data.frame(diff_x, diff_y)
+head(df_mean_diff)
+nrow(df_mean_diff)
+
+# Plotting the results
+diff_plot <- df_mean_diff %>% 
+  ggplot(mapping=aes(x=reorder(diff_x,diff_y), y=diff_y, fill=cut(diff_y, c(-Inf, 0, Inf)), size=3))+
+  geom_bar(stat="identity") +
+  coord_flip()
+
+diff_plot <- print(diff_plot 
+                   + scale_colour_manual(values = c("#F6E8C3", "#8C510A"), aesthetics=c("fill"))
+                   + ggtitle("Apartment")
+                   + labs(y="Difference in Rating (%-point)", x="") 
+                   + scale_colour_hue(labels = c("0 or less", "More than 0"))
+                   + labs(colour="Difference in Rating")
+                   + theme_light()
+                   + theme(legend.position = "none", plot.title=element_text(hjust=0.5, size=10),
+                           axis.title.x=element_text(size=9), axis.title.y=element_text(size=9),
+                           legend.title = element_text(size=9, face="bold"))
+                   + scale_y_continuous(breaks = c(-0.5,0,0.5, 1, 1.5, 2, 2.5, 3), limits=c(-0.5,3))
+                   + guides(size = FALSE)
+                   )
+```
+
+```{r}
+# Defining the chart title
+title_2 <- textGrob("Apartment Rating and Amenities", just = "right", gp=gpar(fontsize=10, font=2))
+
+# Combining the correlation plot and difference bar plot into a single chart using grid.arrange
+corr_plot_img <- readPNG("corr_plot.png")
+corr_plot_grob <- rasterGrob(corr_plot_img, interpolate=TRUE, height = 1, width = 1)
+
+# Creating an empty plot to fill the space in the grid.arrange. For formatting purposes.
+empty <- ggplot()+geom_point(aes(1,1), colour="white")+
+         theme(axis.ticks=element_blank(), 
+               panel.background=element_blank(), 
+               axis.text.x=element_blank(), axis.text.y=element_blank(),
+               axis.title.x=element_blank(), axis.title.y=element_blank())
+
+grid.arrange(empty, title_2, corr_plot_grob, diff_plot, nrow=2, ncol=2, heights=c(1,10), widths=c(4,10)) 
+```
+
+
+# Question 3: Do host qualities affect rating?
+
+For this sub-question, one of our key findings is about the relationship between the number of listings managed by a host and his or her average rating. We begin by doing some data cleaning and by creating features specific to the analysis on host qualities.
+
+```{r}
+# Selecting our features of interest when it comes to host qualities and dropping the rows with NA's resulting in 63,443 listings
+host_qualities <- na.omit(select(listing_red3, host_id, host_since, host_listings_count, host_response_time, host_response_rate, host_has_profile_pic, host_identity_verified, review_scores_rating))
+
+# Dropping the rows with NA's that are in string format i.e. "N/A" resulting in 47,994 listings
+
+host_qualities <- subset(host_qualities, host_qualities$host_response_time != "N/A" | host_qualities$host_response_rate != "N/A")
+
+# Transforming host_response_time to either "within a day" or a "few days or more"
+
+host_qualities$host_response_time[host_qualities$host_response_time != "a few days or more"] <- "within a day"
+
+# Transforming host_response_rate from character to int
+host_qualities$host_response_rate <- as.numeric(sub("%", "", host_qualities$host_response_rate))
+
+# Transforming host_has_profile_pic and host_identity_verified booleans into 1 and 0
+cols <- sapply(host_qualities, is.logical)
+host_qualities[,cols] <- lapply(host_qualities[,cols], as.numeric)
+
+# Adding a new feature for experience_days
+host_qualities$experience_days <- as.numeric(as.Date("2019-11-06") - as.Date(host_qualities$host_since))
+
+# Creating a new data frame containing information by host with their mean rating resulting in 26,249 unique rows with one for each host from 47,994 listings
+
+by_host <- sqldf("SELECT host_id, experience_days, host_listings_count, MODE(host_response_time) AS mode_response_time, host_response_rate, host_has_profile_pic, host_identity_verified, AVG(review_scores_rating) AS mean_rating FROM host_qualities GROUP BY host_id")
+```
+
+The code below generates the chart for rating and host listings count. Specific attention was given to the smaller subgroup of hosts with up to 50 listings.  
+
+```{r}
+# Defining the chart title
+title <- textGrob("Rating and Host Listings Count", just = "centre", gp=gpar(fontsize=10, font=2))
+
+# Plotting the histogram that will appear at the top of the chart
+hist_top <- ggplot() + 
+  geom_histogram(data = by_host, aes(x = host_listings_count, y=..density..), binwidth = 5, fill="grey69") + 
+  scale_y_continuous(breaks = c(0,.2), limits=c(0,.2), labels=percent_format(accuracy=2)) + 
+  xlab("Host Listings Count") + 
+  ylab("Density") + 
+  theme_light() +
+  theme(axis.title.x=element_text(size=9), axis.title.y=element_text(size=9))
+
+# Creating an empty plot to fill the space in the grid.arrange. For formatting purposes.
+empty <- ggplot()+geom_point(aes(1,1), colour="white")+
+         theme(axis.ticks=element_blank(), 
+               panel.background=element_blank(), 
+               axis.text.x=element_blank(), axis.text.y=element_blank(),
+               axis.title.x=element_blank(), axis.title.y=element_blank())
+by_host <- by_host %>% mutate(
+  host_listings_le50=as.factor(ifelse(host_listings_count<=50,1,0))
+  )
+
+# Plotting the scatter diagram
+scatter <- ggplot(data = by_host, aes(x = host_listings_count, y = mean_rating)) + 
+  geom_point(aes(colour=host_listings_le50), alpha = 0.2) + 
+  geom_smooth(method = 'lm', formula = y~x, colour="grey", se=FALSE) + 
+  geom_smooth(data = by_host %>% filter(host_listings_count<=50), 
+              aes(x = host_listings_count, y = mean_rating), 
+              method = 'lm', formula= y~x, colour="orange") +
+  annotate("text", label = 'bold("All hosts")',
+    x = 1200, y = 65, size = 3, colour = "darkgrey", parse=TRUE) +
+  annotate("text", label = 'atop(bold("Hosts with"), bold("<50 listings"))',
+    x = 150, y = 70, size = 3, colour = "tan2", parse=TRUE) +
+  scale_x_continuous(breaks = seq(0, 1300, by = 100)) + 
+  scale_colour_manual(values=c("grey0", "tan3")) +
+  xlab("Host Listings Count") + ylab("Rating") + 
+  theme_light() + 
+  theme(axis.title.x=element_text(size=9), axis.title.y=element_text(size=9),
+        legend.position="none")
+
+# Plotting the histogram that will appear at the right hand side of the chart
+hist_right <- ggplot() + 
+  geom_histogram(data = by_host, aes(x = mean_rating, y=..density..), binwidth = 2, fill="grey69") + 
+  coord_flip() + 
+  scale_y_continuous(breaks = c(0,0.15), limits=c(0,0.15),labels=percent_format(accuracy=2)) + 
+  xlab("Rating") + ylab("Density") + 
+  theme_light() +
+  theme(axis.title.x=element_text(size=9), axis.title.y=element_text(size=9))
+
+# Using the grid.arrange function to combine separate charts into a single chart
+grid.arrange(title, empty, hist_top, empty, scatter, hist_right, ncol=2, nrow=3, widths=c(5,.8), heights=c(0.2, 1, 4))
+
+```
+
